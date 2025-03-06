@@ -7,7 +7,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ClientApp {
-    private static final String SERVER_ADDRESS = "172.26.0.1";
+    private static final String SERVER_ADDRESS = "127.0.0D.1";
     private static final int SERVER_PORT = 12345;
 
     public static void main(String[] args) {
@@ -33,7 +33,7 @@ public class ClientApp {
                 } else if (command.startsWith("DOWNLOAD ")) {
                     writer.println(command);
                     String fileName = command.substring(9);
-                    handlerDownload(socket, fileName, reader);
+                    handlerDownload(socket, fileName, reader, writer);
                 } else if (command.startsWith("ECHO ")) {
                     writer.println(command);
                     System.out.println("Ответ сервера: " + reader.readLine());
@@ -213,7 +213,7 @@ public class ClientApp {
         return null;
     }
 
-    private static void handlerDownload(Socket socket, String fileName, BufferedReader reader) {
+    private static void handlerDownload(Socket socket, String fileName, BufferedReader reader, PrintWriter writer) {
         InputStream inputStream = null;
         try {
             String response = reader.readLine();
@@ -225,13 +225,23 @@ public class ClientApp {
             long fileSize = Long.parseLong(reader.readLine());
             File saveFile = new File(fileName);
 
+            // Проверяем, если файл уже частично скачан, то передаем серверу информацию о размере уже скачанных данных
+            long existingFileSize = 0;
+            if (saveFile.exists()) {
+                existingFileSize = saveFile.length();
+                System.out.println("Файл найден, продолжаем с " + existingFileSize + " байт.");
+                // Отправляем информацию о месте, с которого нужно продолжить скачивание
+                writer.println("RESUME " + existingFileSize);
+            } else {
+                writer.println("START");
+            }
+
             inputStream = socket.getInputStream();
 
-            try (FileOutputStream fileOutputStream = new FileOutputStream(saveFile)) {
-
+            try (FileOutputStream fileOutputStream = new FileOutputStream(saveFile, true)) { // Открываем файл в режиме дозаписи (append)
                 byte[] buffer = new byte[4096];
                 int bytesRead;
-                long totalRead = 0;
+                long totalRead = existingFileSize; // Начинаем с того места, где остановились
 
                 long startTime = System.currentTimeMillis(); // Время начала получения данных
 
@@ -260,10 +270,10 @@ public class ClientApp {
                     System.out.println("Ошибка: не все данные были получены.");
                 }
             }
-        } catch (IOException |
-                 NumberFormatException e) {
+        } catch (IOException | NumberFormatException e) {
             System.out.println("Ошибка при получении файла: " + e.getMessage());
         }
     }
+
 
 }
