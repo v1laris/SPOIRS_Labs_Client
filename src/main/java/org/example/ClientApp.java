@@ -2,19 +2,24 @@ package org.example;
 
 import java.io.*;
 import java.net.Socket;
+import java.security.MessageDigest;
 import java.util.Scanner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import me.tongfei.progressbar.ProgressBar;
 
 public class ClientApp {
-    private static final String SERVER_ADDRESS = "127.0.0D.1";
+    private static final String SERVER_ADDRESS = "127.0.0.1";
     private static final int SERVER_PORT = 12345;
-
+//    private static Socket socket;
+//    private static PrintWriter writer;
+//    private static BufferedReader reader;
+//    private static boolean connected = false;
     public static void main(String[] args) {
         try (Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-             Scanner scanner = new Scanner(System.in)) {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+            Scanner scanner = new Scanner(System.in)) {
 
             System.out.println("Подключено к серверу " + SERVER_ADDRESS + ":" + SERVER_PORT);
             System.out.println("Введите команду (ECHO, TIME, CLOSE, UPLOAD, DOWNLOAD):");
@@ -28,13 +33,15 @@ public class ClientApp {
                     System.out.println("Завершение соединения...");
                     break;
                 } else if (command.startsWith("UPLOAD ")) {
-//                    handleUpload(command, socket, writer, reader);
-                    handleUploadWithResume(command, socket, writer, reader);
+                    handleUploadWithResume(command, socket, writer, reader, scanner);
                 } else if (command.startsWith("DOWNLOAD ")) {
                     writer.println(command);
                     String fileName = command.substring(9);
                     handlerDownload(socket, fileName, reader, writer);
                 } else if (command.startsWith("ECHO ")) {
+                    writer.println(command);
+                    System.out.println("Ответ сервера: " + reader.readLine());
+                }  else if (command.startsWith("TIME")) {
                     writer.println(command);
                     System.out.println("Ответ сервера: " + reader.readLine());
                 }
@@ -45,7 +52,13 @@ public class ClientApp {
         }
     }
 
-    private static void handleUpload(String command, Socket socket, PrintWriter writer, BufferedReader reader) {
+    private static void handleUploadWithResume(
+            String command,
+            Socket socket,
+            PrintWriter writer,
+            BufferedReader reader,
+            Scanner scanner
+    ) {
         String[] parsed = extractPathAndFileName(command);
         if (parsed == null) {
             System.out.println("Ошибка: формат команды - UPLOAD 'путь_к_файлу' новое_имя");
@@ -71,138 +84,90 @@ public class ClientApp {
             }
 
             long fileSize = file.length();
+            String fileHash = computeFileHash(file);
+            System.out.println("Хеш-сумма файла: " + fileHash);
+
             writer.println(fileSize);
+            writer.println(fileHash);
+            writer.flush();
 
-            sendFile(socket.getOutputStream(), file);
-            String confirmation = reader.readLine(); // Читаем подтверждение
-            if ("DONE".equals(confirmation)) {
-                System.out.println("Файл успешно загружен: " + file.getName());
-            } else {
-                System.out.println("Ошибка: сервер не отправил подтверждение.");
-            }
-        } catch (IOException e) {
-            System.out.println("Ошибка при отправке файла: " + e.getMessage());
-        }
-    }
+            String serverResponse = reader.readLine();
+            System.out.println(serverResponse);
 
-    private static void handleUploadWithResume(String command, Socket socket, PrintWriter writer, BufferedReader reader) {
-        String[] parsed = extractPathAndFileName(command);
-        if (parsed == null) {
-            System.out.println("Ошибка: формат команды - UPLOAD 'путь_к_файлу' новое_имя");
-            return;
-        }
-
-        String sourceFilePath = parsed[0];
-        String newFileName = parsed[1];
-        File file = new File(sourceFilePath);
-
-        if (!file.exists() || !file.isFile()) {
-            System.out.println("Ошибка: файл не найден!");
-            return;
-        }
-
-        writer.println("UPLOAD " + newFileName);
-
-        try {
-            // Получаем ответ от сервера
-            String response = reader.readLine();
-            if (!"READY".equals(response)) {
-                System.out.println("Сервер отказал в приеме файла: " + response);
-                return;
+            if ("FILE_EXISTS".equals(serverResponse)) {
+                System.out.println("Файл с таким содержимым уже существует.");
+                System.out.print("Загружать его снова? (y/n): ");
+                String answer = scanner.nextLine();
+                if (answer.equalsIgnoreCase("y")) {
+                    writer.println("REUPLOAD");
+                    String newNameFromServer = reader.readLine();
+                    System.out.println("Новый файл будет сохранен как: " + newNameFromServer);
+                } else {
+                    writer.println("SKIP");
+                    return;
+                }
+            } else if ("FILE_CONFLICT".equals(serverResponse)) {
+                System.out.print("Введите новое имя (или оставьте пустым для копии): ");
+                String newName = scanner.nextLine();
+                writer.println(newName);
             }
 
-            long fileSize = file.length();
-            writer.println(fileSize);
-            writer.flush();  // Убедимся, что размер файла отправлен немедленно
+            long totalBytesSent = Long.parseLong(reader.readLine());
+            System.out.printf("Начинаем загрузку с: %d байт\n", totalBytesSent);
 
-            // Чтение состояния докачки
-            long totalBytesSent = getTotalBytesSent(newFileName); // Получаем прогресс предыдущей передачи
+            try (FileInputStream fileInputStream = new FileInputStream(file);
+                ProgressBar progressBar = new ProgressBar("Загрузка", fileSize)) {
 
-            // Отправка файла с сохранением прогресса
-            long startTime = System.currentTimeMillis(); // Время начала передачи
-            long bytesSent = totalBytesSent; // Начинаем с того места, где остановились
+                progressBar.stepTo(totalBytesSent);
 
-            try (FileInputStream fileInputStream = new FileInputStream(file)) {
-                // Пропустить уже отправленные байты
                 fileInputStream.skip(totalBytesSent);
-
                 byte[] buffer = new byte[4096];
                 int bytesRead;
+                long startTime = System.currentTimeMillis();
+                long bytesSent = totalBytesSent;
+                OutputStream os = socket.getOutputStream();
+
                 while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                    socket.getOutputStream().write(buffer, 0, bytesRead);
+                    os.write(buffer, 0, bytesRead);
                     bytesSent += bytesRead;
-
-                    // Каждые 500 миллисекунд обновляем битрейт
-                    long elapsedTime = System.currentTimeMillis() - startTime;
-                    if (elapsedTime > 500) { // Обновляем каждые 500 мс
-                        long bitRate = (bytesSent * 8) / elapsedTime; // Битрейт в битах в секунду
-                        System.out.printf("Битрейт: %.2f Kbps\n", bitRate / 1000.0); // Выводим битрейт в Kbps
-                        startTime = System.currentTimeMillis(); // Сбрасываем время для следующего расчета
-                    }
-
-                    // Сохраняем прогресс
-                    saveProgress(newFileName, bytesSent); // Сохраняем прогресс в файл
+                    progressBar.stepBy(bytesRead);
+                    //Thread.sleep(1);
                 }
+                System.out.println();
+
+                long elapsedTime = System.currentTimeMillis() - startTime;
+                double bitRate = (double) (bytesSent - totalBytesSent) * 8 / elapsedTime / 1000.0;
+                System.out.printf("Битрейт: %.2f Mbps\n", bitRate);
             }
 
-            // Подтверждение завершения передачи
-            String confirmation = reader.readLine(); // Читаем подтверждение
+            String confirmation = reader.readLine();
             if ("DONE".equals(confirmation)) {
                 System.out.println("Файл успешно загружен: " + file.getName());
             } else {
                 System.out.println("Ошибка: сервер не отправил подтверждение.");
             }
-        } catch (IOException e) {
+        } catch (Exception e) {
             System.out.println("Ошибка при отправке файла: " + e.getMessage());
         }
     }
 
-    // Метод для получения прогресса передачи
-    private static long getTotalBytesSent(String fileName) {
-        File progressFile = new File(fileName + ".progress");
-        if (progressFile.exists()) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(progressFile))) {
-                String progress = reader.readLine();
-                return Long.parseLong(progress);
-            } catch (IOException | NumberFormatException e) {
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    // Метод для сохранения прогресса передачи
-    private static void saveProgress(String fileName, long bytesSent) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName + ".progress"))) {
-            writer.write(Long.toString(bytesSent));
-        } catch (IOException e) {
-            System.out.println("Ошибка при сохранении прогресса: " + e.getMessage());
-        }
-    }
-
-
-    private static void sendFile(OutputStream outputStream, File file) throws IOException {
-        try (FileInputStream fileInputStream = new FileInputStream(file)) {
+    private static String computeFileHash(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream fis = new FileInputStream(file)) {
             byte[] buffer = new byte[4096];
             int bytesRead;
-            long totalBytesSent = 0;
-            long startTime = System.currentTimeMillis(); // Время начала передачи данных
-
-            while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead);
-                totalBytesSent += bytesRead;
-
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                digest.update(buffer, 0, bytesRead);
             }
-            long elapsedTime = System.currentTimeMillis() - startTime;
-            if (elapsedTime > 0) {
-                long bitRate = (totalBytesSent * 8) / elapsedTime;
-                System.out.printf("Битрейт: %.2f Kbps\n", bitRate / 1000.0); // выводим битрейт в Kbps
-            }
-            outputStream.flush();
         }
+        byte[] hashBytes = digest.digest();
+        StringBuilder sb = new StringBuilder();
+        for (byte b : hashBytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
-    // UPLOAD '/home/bobr/IdeaProjects/university/sem6/SPOIRS/lab1_server/server_files/tmp2.jpg' qwe.jpg
     private static String[] extractPathAndFileName(String command) {
         Pattern pattern = Pattern.compile("UPLOAD\\s+'(.*?)'\\s+(\\S+)");
         Matcher matcher = pattern.matcher(command);
@@ -214,53 +179,60 @@ public class ClientApp {
     }
 
     private static void handlerDownload(Socket socket, String fileName, BufferedReader reader, PrintWriter writer) {
-        InputStream inputStream = null;
         try {
             String response = reader.readLine();
             if (!"READY".equals(response)) {
                 System.out.println("Ошибка: сервер отказал в передаче файла - " + response);
                 return;
             }
-
-            long fileSize = Long.parseLong(reader.readLine());
+            long serverFileSize = Long.parseLong(reader.readLine());
             File saveFile = new File(fileName);
-
-            // Проверяем, если файл уже частично скачан, то передаем серверу информацию о размере уже скачанных данных
             long existingFileSize = 0;
             if (saveFile.exists()) {
                 existingFileSize = saveFile.length();
-                System.out.println("Файл найден, продолжаем с " + existingFileSize + " байт.");
-                // Отправляем информацию о месте, с которого нужно продолжить скачивание
-                writer.println("RESUME " + existingFileSize);
+                if (existingFileSize < serverFileSize) {
+                    System.out.println("Файл найден, продолжаем с " + existingFileSize + " байт.");
+                    writer.println("RESUME " + existingFileSize);
+                } else if (existingFileSize == serverFileSize) {
+                    System.out.print("Файл уже полностью скачан. Перекачать заново? (y/n): ");
+                    Scanner scanner = new Scanner(System.in);
+                    String answer = scanner.nextLine();
+                    if ("y".equalsIgnoreCase(answer)) {
+                        writer.println("START");
+                        saveFile.delete();
+                        existingFileSize = 0;
+                    } else {
+                        writer.println("ABORT");
+                        System.out.println("Скачивание отменено.");
+                        return;
+                    }
+                } else {
+                    System.out.println("Локальный файл больше серверного. Перекачиваем заново.");
+                    writer.println("START");
+                    saveFile.delete();
+                    existingFileSize = 0;
+                }
             } else {
                 writer.println("START");
             }
-
-            inputStream = socket.getInputStream();
-
-            try (FileOutputStream fileOutputStream = new FileOutputStream(saveFile, true)) { // Открываем файл в режиме дозаписи (append)
+            InputStream inputStream = socket.getInputStream();
+            try (FileOutputStream fileOutputStream = new FileOutputStream(saveFile, true)) {
                 byte[] buffer = new byte[4096];
                 int bytesRead;
-                long totalRead = existingFileSize; // Начинаем с того места, где остановились
-
-                long startTime = System.currentTimeMillis(); // Время начала получения данных
-
-                while (totalRead < fileSize) {
-                    // Читаем только столько байт, сколько осталось для получения
-                    int bytesToRead = (int) Math.min(buffer.length, fileSize - totalRead);
+                long totalRead = existingFileSize;
+                long startTime = System.currentTimeMillis();
+                while (totalRead < serverFileSize) {
+                    int bytesToRead = (int) Math.min(buffer.length, serverFileSize - totalRead);
                     bytesRead = inputStream.read(buffer, 0, bytesToRead);
-                    if (bytesRead == -1) {
-                        break;
-                    }
+                    if (bytesRead <= 0) break;
                     fileOutputStream.write(buffer, 0, bytesRead);
                     totalRead += bytesRead;
                 }
                 long elapsedTime = System.currentTimeMillis() - startTime;
-                long bitRate = (totalRead * 8) / elapsedTime; // Битрейт в битах в секунду
-                System.out.printf("Битрейт: %.2f Kbps\n", bitRate / 1000.0); // Выводим битрейт в Kbps
-
-                if (totalRead == fileSize) {
-                    String confirmation = reader.readLine(); // Читаем подтверждение
+                long bitRate = (totalRead * 8) / elapsedTime;
+                System.out.printf("Битрейт: %.2f Kbps\n", bitRate / 1000.0);
+                if (totalRead == serverFileSize) {
+                    String confirmation = reader.readLine();
                     if ("DONE".equals(confirmation)) {
                         System.out.println("Файл успешно загружен: " + fileName);
                     } else {
@@ -274,6 +246,4 @@ public class ClientApp {
             System.out.println("Ошибка при получении файла: " + e.getMessage());
         }
     }
-
-
 }
