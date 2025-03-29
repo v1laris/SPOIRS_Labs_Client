@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
 import me.tongfei.progressbar.ProgressBar;
 
 public class ClientApp {
-    private static final String SERVER_ADDRESS = "192.168.179.201";
+    private static final String SERVER_ADDRESS = "localhost";
     private static final int SERVER_PORT = 12345;
     private static Socket socket;
     private static PrintWriter writer;
@@ -99,40 +99,6 @@ public class ClientApp {
                 System.out.println("Неизвестная команда. Доступны: CONNECT, CLOSE, UPLOAD, DOWNLOAD, ECHO, TIME");
             }
         }
-//        try (Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
-//            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-//            PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-//            Scanner scanner = new Scanner(System.in)) {
-//
-//            System.out.println("Подключено к серверу " + SERVER_ADDRESS + ":" + SERVER_PORT);
-//            System.out.println("Введите команду (ECHO, TIME, CLOSE, UPLOAD, DOWNLOAD):");
-//
-//            while (true) {
-//                System.out.print("> ");
-//                String command = scanner.nextLine();
-//
-//                if (command.equalsIgnoreCase("CLOSE")) {
-//                    writer.println(command);
-//                    System.out.println("Завершение соединения...");
-//                    break;
-//                } else if (command.startsWith("UPLOAD ")) {
-//                    handleUploadWithResume(command, socket, writer, reader, scanner);
-//                } else if (command.startsWith("DOWNLOAD ")) {
-//                    writer.println(command);
-//                    String fileName = command.substring(9);
-//                    handlerDownload(socket, fileName, reader, writer);
-//                } else if (command.startsWith("ECHO ")) {
-//                    writer.println(command);
-//                    System.out.println("Ответ сервера: " + reader.readLine());
-//                }  else if (command.startsWith("TIME")) {
-//                    writer.println(command);
-//                    System.out.println("Ответ сервера: " + reader.readLine());
-//                }
-//            }
-//
-//        } catch (IOException e) {
-//            e.printStackTrace();
-//        }
     }
 
     private static boolean connect() {
@@ -229,6 +195,7 @@ public class ClientApp {
         writer.println(fileHash);
         writer.flush();
 
+        System.out.println("Ждём ответа сервера");
         String serverResponse = reader.readLine();
         System.out.println(serverResponse);
 
@@ -246,9 +213,9 @@ public class ClientApp {
                 return;
             }
         } else if ("FILE_CONFLICT".equals(serverResponse)) {
-            System.out.print("Введите новое имя (или оставьте пустым для копии): ");
-            String newName = scanner.nextLine();
-            writer.println(newName);
+//            System.out.print("Введите новое имя (или оставьте пустым для копии): ");
+//            String newName = scanner.nextLine();
+//            writer.println(newName);
         }
 
         long totalBytesSent = Long.parseLong(reader.readLine());
@@ -282,12 +249,12 @@ public class ClientApp {
             System.out.printf("Битрейт: %.2f Mbps\n", bitRate);
         }
 
-        String confirmation = reader.readLine();
-        if ("DONE".equals(confirmation)) {
-            System.out.println("Файл успешно загружен: " + file.getName());
-        } else {
-            System.out.println("Ошибка: сервер не отправил подтверждение.");
-        }
+//        String confirmation = reader.readLine();
+//        if ("DONE".equals(confirmation)) {
+//            System.out.println("Файл успешно загружен: " + file.getName());
+//        } else {
+//            System.out.println("Ошибка: сервер не отправил подтверждение.");
+//        }
     }
 
     private static void resumeUpload() {
@@ -335,11 +302,14 @@ public class ClientApp {
 
         String fileName = command.substring(9).trim();
         writer.println(command);
+        writer.flush(); // Убедимся, что команда отправлена
+
         String response = reader.readLine();
         if (!"READY".equals(response)) {
             System.out.println("Ошибка: сервер отказал в передаче файла - " + response);
             return;
         }
+        //System.out.println("Сервер - READY");
         long serverFileSize = Long.parseLong(reader.readLine());
         File saveFile = new File(fileName);
         long existingFileSize = 0;
@@ -370,20 +340,23 @@ public class ClientApp {
         } else {
             writer.println("START");
         }
+        writer.flush();
 
         try (FileOutputStream fos = new FileOutputStream(saveFile, true);
-             // Инициализируем прогресс-бар с полным размером файла
              ProgressBar progressBar = new ProgressBar("Загрузка", serverFileSize)) {
-            // Устанавливаем начальное значение, если файл докачивается
             progressBar.stepTo(existingFileSize);
             InputStream inputStream = socket.getInputStream();
             byte[] buffer = new byte[4096];
             int bytesRead;
             long totalRead = existingFileSize;
             long startTime = System.currentTimeMillis();
+            //System.out.println("Server file size: " + serverFileSize);
+
             while (totalRead < serverFileSize) {
+                //System.out.println("Total read: " + totalRead);
                 int bytesToRead = (int) Math.min(buffer.length, serverFileSize - totalRead);
                 bytesRead = inputStream.read(buffer, 0, bytesToRead);
+                //System.out.println("Total read: " + totalRead);
                 if (bytesRead <= 0) break;
                 fos.write(buffer, 0, bytesRead);
                 totalRead += bytesRead;
@@ -394,12 +367,7 @@ public class ClientApp {
             long bitRate = (totalRead * 8) / (elapsedTime + 1);
             System.out.printf("Битрейт: %.2f Kbps\n", bitRate / 1000.0);
             if (totalRead == serverFileSize) {
-                String confirmation = reader.readLine();
-                if ("DONE".equals(confirmation)) {
-                    System.out.println("Файл успешно загружен: " + fileName);
-                } else {
-                    System.out.println("Ошибка: сервер не отправил подтверждение.");
-                }
+                System.out.println("Файл успешно загружен: " + fileName);
             } else {
                 System.out.println("Ошибка: не все данные были получены.");
             }
